@@ -27,7 +27,9 @@ NVCC_ARCH_FLAGS := -arch=$(CUDA_ARCH)
 endif
 NVCCFLAGS ?= -O3 --use_fast_math $(NVCC_ARCH_FLAGS) -Xcompiler $(NATIVE_CPU_FLAG) -Xcompiler -pthread
 CUDA_LDLIBS ?= -lm -Xcompiler -pthread -L$(CUDA_HOME)/targets/sbsa-linux/lib -L$(CUDA_HOME)/lib64 -lcudart -lcublas
-CORE_OBJS = ds4.o ds4_cuda.o
+NCCL_HOME ?= /home/tim/code/nccl/build
+CUDA_LDLIBS += -L$(NCCL_HOME)/lib -lnccl
+CORE_OBJS = ds4.o ds4_cuda.o ds4_tp.o
 CPU_CORE_OBJS = ds4_cpu.o
 METAL_LDLIBS := $(LDLIBS)
 endif
@@ -116,6 +118,9 @@ ds4_cuda.o: ds4_cuda.cu ds4_gpu.h ds4_iq2_tables_cuda.inc
 
 tests/cuda_long_context_smoke: tests/cuda_long_context_smoke.o ds4_cuda.o
 	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
+
+ds4_tp.o: ds4_tp.cu ds4_tp.h ds4_gpu.h
+	$(NVCC) $(NVCCFLAGS) -I$(NCCL_HOME)/include -c -o $@ ds4_tp.cu
 
 ds4_test: ds4_test.o rax.o $(CORE_OBJS)
 ifeq ($(UNAME_S),Darwin)

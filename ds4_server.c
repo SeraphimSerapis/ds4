@@ -7906,6 +7906,12 @@ static void usage(FILE *fp) {
         "      Apply steering after attention outputs. Default: 0\n"
         "  --warm-weights\n"
         "      Touch mapped tensor pages before serving. Slower startup, fewer first-use stalls.\n"
+        "  --tp N\n"
+        "      Tensor parallelism degree (1 or 2). Requires --cuda.\n"
+        "  --tp-rank N\n"
+        "      TP rank (0..N-1). Default: 0.\n"
+        "  --tp-master HOST:PORT\n"
+        "      Master node address for TP rendezvous (rank 0 binds, others connect).\n"
         "  --metal | --cuda | --cpu | --backend NAME\n"
         "      Select backend explicitly. Defaults to Metal on macOS and CUDA on CUDA builds.\n"
         "\n"
@@ -8058,6 +8064,12 @@ static server_config parse_options(int argc, char **argv) {
             directional_steering_scale_set = true;
         } else if (!strcmp(arg, "--warm-weights")) {
             c.engine.warm_weights = true;
+        } else if (!strcmp(arg, "--tp")) {
+            c.engine.tp_size = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--tp-rank")) {
+            c.engine.tp_rank = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--tp-master")) {
+            c.engine.tp_master_addr = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--metal")) {
             c.engine.backend = DS4_BACKEND_METAL;
         } else if (!strcmp(arg, "--cuda")) {

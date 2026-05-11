@@ -95,6 +95,12 @@ static void usage(FILE *fp) {
         "      Use the CPU reference/debug backend. Not recommended for normal inference.\n"
         "  --backend NAME\n"
         "      Select backend explicitly: metal, cuda, or cpu.\n"
+        "  --tp N\n"
+        "      Tensor parallelism degree (1 or 2). Requires --cuda.\n"
+        "  --tp-rank N\n"
+        "      TP rank (0..N-1). Default: 0.\n"
+        "  --tp-master HOST:PORT\n"
+        "      Master node address for TP rendezvous (rank 0 binds, others connect).\n"
         "  -t, --threads N\n"
         "      CPU helper threads for host-side or reference work.\n"
         "  --quality\n"
@@ -1250,6 +1256,12 @@ static cli_config parse_options(int argc, char **argv) {
             c.engine.backend = DS4_BACKEND_METAL;
         } else if (!strcmp(arg, "--cuda")) {
             c.engine.backend = DS4_BACKEND_CUDA;
+        } else if (!strcmp(arg, "--tp")) {
+            c.engine.tp_size = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--tp-rank")) {
+            c.engine.tp_rank = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--tp-master")) {
+            c.engine.tp_master_addr = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--dump-tokens")) {
             c.gen.dump_tokens = true;
         } else if (!strcmp(arg, "--dump-logprobs")) {

@@ -38,6 +38,7 @@
 
 #ifndef DS4_NO_GPU
 #include "ds4_gpu.h"
+#include "ds4_tp.h"
 #endif
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -9598,6 +9599,11 @@ static bool metal_graph_encode_decode_layer(
     if (ok && metal_graph_directional_steering_attn_enabled(g)) {
         ok = metal_graph_apply_directional_steering_attn(g, g->attn_out, il, 1);
     }
+#ifndef DS4_NO_GPU
+    if (ok && ds4_tp_enabled()) {
+        if (ds4_tp_allreduce_f16(g->attn_out)) ok = false;
+    }
+#endif
     if (ok && !fuse_attn_out_hc) {
         ok = ds4_gpu_hc_expand_tensor(g->after_attn_hc, g->attn_out, g->cur_hc,
                                         g->hc_post, g->hc_comb, DS4_N_EMBD, DS4_N_HC) != 0;
@@ -9712,6 +9718,11 @@ static bool metal_graph_encode_decode_layer(
     if (ok) {
         metal_graph_debug_dump_tensor("ffn_moe_out", g->routed_out, DS4_N_EMBD, il, pos);
     }
+#ifndef DS4_NO_GPU
+    if (ok && ds4_tp_enabled()) {
+        if (ds4_tp_allreduce_f16(g->routed_out)) ok = false;
+    }
+#endif
     const bool fuse_shared_gate_up =
         !g->quality &&
         getenv("DS4_METAL_DISABLE_SHARED_GATE_UP_SWIGLU_FUSION") == NULL;
@@ -9765,6 +9776,11 @@ static bool metal_graph_encode_decode_layer(
     if (ok) {
         metal_graph_debug_dump_tensor("ffn_shexp", g->shared_out, DS4_N_EMBD, il, pos);
     }
+#ifndef DS4_NO_GPU
+    if (ok && ds4_tp_enabled()) {
+        if (ds4_tp_allreduce_f16(g->shared_out)) ok = false;
+    }
+#endif
     if (ok && keep_ffn_out) {
         ok = metal_graph_ensure_ffn_out(g) &&
              ds4_gpu_add_tensor(g->ffn_out, g->shared_out, g->routed_out, DS4_N_EMBD) != 0;
@@ -12267,6 +12283,16 @@ static bool metal_graph_encode_layer_attention_batch(
     if (ok && metal_graph_directional_steering_attn_enabled(g)) {
         ok = metal_graph_apply_directional_steering_attn(g, g->batch_attn_out, il, n_tokens);
     }
+#ifndef DS4_NO_GPU
+    if (ok && ds4_tp_enabled()) {
+        ds4_gpu_tensor *attn_view = ds4_gpu_tensor_view(g->batch_attn_out, 0,
+                                                        (uint64_t)n_tokens * DS4_N_EMBD * sizeof(float));
+        if (attn_view) {
+            if (ds4_tp_allreduce_f16(attn_view)) ok = false;
+            ds4_gpu_tensor_free(attn_view);
+        }
+    }
+#endif
     if (ok) ok = ds4_gpu_hc_expand_split_tensor(after_attn_hc_view,
                                                   g->batch_attn_out,
                                                   g->batch_cur_hc,
@@ -12465,8 +12491,18 @@ static bool metal_graph_encode_layer_ffn_batch(
     }
     if (ok) {
         metal_graph_debug_dump_tensor("ffn_moe_out", g->batch_routed_out,
-                                      (uint64_t)n_tokens * DS4_N_EMBD, il, pos0);
+                                       (uint64_t)n_tokens * DS4_N_EMBD, il, pos0);
     }
+#ifndef DS4_NO_GPU
+    if (ok && ds4_tp_enabled()) {
+        ds4_gpu_tensor *routed_view = ds4_gpu_tensor_view(g->batch_routed_out, 0,
+                                                          (uint64_t)n_tokens * DS4_N_EMBD * sizeof(float));
+        if (routed_view) {
+            if (ds4_tp_allreduce_f16(routed_view)) ok = false;
+            ds4_gpu_tensor_free(routed_view);
+        }
+    }
+#endif
     DS4_METAL_PROFILE_FFN_STAGE("routed_moe");
     if (ok) ok = ds4_gpu_matmul_q8_0_tensor(g->batch_shared_gate,
                                               model->map,
@@ -12502,9 +12538,18 @@ static bool metal_graph_encode_layer_ffn_batch(
     DS4_METAL_PROFILE_FFN_STAGE("shared_down");
     if (ok) {
         metal_graph_debug_dump_tensor("ffn_shexp", g->batch_shared_out,
-                                      (uint64_t)n_tokens * DS4_N_EMBD, il, pos0);
+                                       (uint64_t)n_tokens * DS4_N_EMBD, il, pos0);
     }
-
+#ifndef DS4_NO_GPU
+    if (ok && ds4_tp_enabled()) {
+        ds4_gpu_tensor *shared_view = ds4_gpu_tensor_view(g->batch_shared_out, 0,
+                                                          (uint64_t)n_tokens * DS4_N_EMBD * sizeof(float));
+        if (shared_view) {
+            if (ds4_tp_allreduce_f16(shared_view)) ok = false;
+            ds4_gpu_tensor_free(shared_view);
+        }
+    }
+#endif
     const bool keep_ffn_out = metal_graph_needs_ffn_out(g, il, pos0);
     if (ok && keep_ffn_out) {
         ok = metal_graph_ensure_batch_ffn_out(g) &&
@@ -16547,6 +16592,16 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
         e->directional_steering_ffn_scale = opt->directional_steering_ffn;
     }
     if (opt->n_threads > 0) g_requested_threads = (uint32_t)opt->n_threads;
+#ifndef DS4_NO_GPU
+    if (opt->tp_size > 1 && opt->backend == DS4_BACKEND_CUDA) {
+        if (!ds4_tp_init(opt->tp_size, opt->tp_rank, opt->tp_master_addr)) {
+            fprintf(stderr, "ds4: TP initialization failed\n");
+            free(e);
+            *out = NULL;
+            return 1;
+        }
+    }
+#endif
     ds4_acquire_instance_lock();
 
     const bool graph_backend = ds4_backend_uses_graph(opt->backend);
@@ -16660,6 +16715,7 @@ void ds4_engine_close(ds4_engine *e) {
     if (e->mtp_ready) model_close(&e->mtp_model);
     model_close(&e->model);
 #ifndef DS4_NO_GPU
+    ds4_tp_cleanup();
     ds4_gpu_cleanup();
 #endif
     ds4_release_instance_lock();
