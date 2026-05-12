@@ -9,40 +9,38 @@
 extern "C" {
 #endif
 
+/* Forward declaration. */
+struct ds4_session;
+
 /* =========================================================================
  * Tensor Parallelism (TP) via NCCL.
  *
- * Provides all-reduce over f16/f32 device tensors across TP ranks.
- * Weights are still fully replicated on each rank; only activations are
- * all-reduced at the three fusion boundaries (attention output, routed MoE,
- * shared expert). This is the Phase-1 "replicated weights" approach.
+ * Rank 0 handles HTTP, broadcasts work to rank 1 via a persistent TCP
+ * control channel. Both ranks run the same inference code; NCCL all-reduce
+ * at three fusion boundaries (attention output, routed MoE, shared expert)
+ * ensures correct results.
  * ========================================================================= */
 
-/* Initialize TP. Returns true on success. Call before any GPU init.
- * tp_size=1 is a no-op (single GPU, TP disabled). */
 bool ds4_tp_init(int tp_size, int tp_rank, const char *master_addr);
-
-/* Tear down TP. Call during engine cleanup. */
 void ds4_tp_cleanup(void);
-
-/* Is TP active (size > 1)? */
 bool ds4_tp_enabled(void);
-
-/* Current TP size and rank. */
 int ds4_tp_size(void);
 int ds4_tp_rank(void);
 
-/* All-reduce f16 tensor in-place. The tensor must have the same size on
- * every rank. Synchronizes with the CUDA stream used by the GPU executor. */
-int ds4_tp_allreduce_f16(ds4_gpu_tensor *tensor);
+/* Rank 1: start worker thread that listens for commands from rank 0. */
+int ds4_tp_worker_init(struct ds4_session *session);
 
-/* All-reduce f32 tensor in-place. */
+/* Rank 0: broadcast commands to rank 1. Block until ack received. */
+int ds4_tp_broadcast_prefill(const int *tokens, int n_tokens);
+int ds4_tp_broadcast_eval(int token);
+int ds4_tp_broadcast_eval_batch(const int *tokens, int n_tokens);
+int ds4_tp_broadcast_done(void);
+
+/* All-reduce on GPU tensors. */
+int ds4_tp_allreduce_f16(ds4_gpu_tensor *tensor);
 int ds4_tp_allreduce_f32(ds4_gpu_tensor *tensor);
 
-/* Get the NCCL comm handle (opaque, for advanced use). */
 void *ds4_tp_nccl_comm(void);
-
-/* Get the CUDA stream used for TP collectives. */
 void *ds4_tp_cuda_stream(void);
 
 #ifdef __cplusplus

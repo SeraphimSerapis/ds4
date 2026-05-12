@@ -1,5 +1,8 @@
 #include "ds4.h"
 #include "rax.h"
+#ifndef DS4_NO_GPU
+#include "ds4_tp.h"
+#endif
 
 /* OpenAI/Anthropic compatible local server.
  *
@@ -7030,6 +7033,17 @@ static void generate_job(server *s, job *j) {
         ds4_tokens_free(&prefix);
     }
 
+#ifndef DS4_NO_GPU
+    if (ds4_tp_enabled() && ds4_tp_rank() == 0) {
+        if (ds4_tp_broadcast_prefill(prompt_for_sync->v, prompt_for_sync->len) != 0) {
+            ds4_tokens_free(&effective_prompt);
+            ds4_session_set_progress(s->session, NULL, NULL);
+            trace_event(s, trace_id, "TP prefill broadcast failed");
+            http_error(j->fd, 500, "TP prefill broadcast failed");
+            return;
+        }
+    }
+#endif
     if (ds4_session_sync(s->session, prompt_for_sync, err, sizeof(err)) != 0) {
         ds4_tokens_free(&effective_prompt);
         ds4_session_set_progress(s->session, NULL, NULL);
@@ -7135,18 +7149,37 @@ static void generate_job(server *s, job *j) {
 
         int toks[17];
         int ntok = 0;
+#ifndef DS4_NO_GPU
+        if (ds4_tp_enabled() && ds4_tp_rank() == 0) {
+            if (temperature <= 0.0f &&
+                ds4_engine_mtp_draft_tokens(s->engine) > 1 &&
+                getenv("DS4_MTP_SPEC_DISABLE") == NULL)
+            {
+                /* Speculative decode: broadcast single token (rank 1 does single eval per token). */
+                if (ds4_tp_broadcast_eval(token) != 0) {
+                    finish = "error";
+                    break;
+                }
+            } else {
+                if (ds4_tp_broadcast_eval(token) != 0) {
+                    finish = "error";
+                    break;
+                }
+            }
+        }
+#endif
         if (temperature <= 0.0f &&
             ds4_engine_mtp_draft_tokens(s->engine) > 1 &&
             getenv("DS4_MTP_SPEC_DISABLE") == NULL)
         {
             ntok = ds4_session_eval_speculative_argmax(s->session,
-                                                       token,
-                                                       max_tokens - completion,
-                                                       ds4_token_eos(s->engine),
-                                                       toks,
-                                                       (int)(sizeof(toks) / sizeof(toks[0])),
-                                                       err,
-                                                       sizeof(err));
+                                                        token,
+                                                        max_tokens - completion,
+                                                        ds4_token_eos(s->engine),
+                                                        toks,
+                                                        (int)(sizeof(toks) / sizeof(toks[0])),
+                                                        err,
+                                                        sizeof(err));
             if (ntok < 0) {
                 finish = "error";
                 break;
@@ -7471,6 +7504,11 @@ static void generate_job(server *s, job *j) {
                        now_sec() - t0);
         }
     }
+#ifndef DS4_NO_GPU
+    if (ds4_tp_enabled() && ds4_tp_rank() == 0) {
+        ds4_tp_broadcast_done();
+    }
+#endif
     free(parsed_content);
     free(parsed_reasoning);
     tool_calls_free(&parsed_calls);
@@ -8153,6 +8191,27 @@ int main(int argc, char **argv) {
         setvbuf(s.trace, NULL, _IONBF, 0);
         server_log(DS4_LOG_DEFAULT, "ds4-server: tracing session to %s", cfg.trace_path);
     }
+
+    /* TP rank 1: skip HTTP, run TP worker thread instead. */
+#ifndef DS4_NO_GPU
+    if (ds4_tp_enabled() && ds4_tp_rank() != 0) {
+        if (ds4_tp_worker_init(session) != 0) {
+            server_log(DS4_LOG_DEFAULT, "ds4-server: TP worker init failed");
+            ds4_session_free(session);
+            ds4_engine_close(engine);
+            return 1;
+        }
+        server_log(DS4_LOG_DEFAULT, "ds4-server: TP worker (rank %d) waiting for commands from rank 0", ds4_tp_rank());
+        /* Block until shutdown signal. */
+        while (!g_stop_requested) {
+            usleep(100000);
+        }
+        ds4_tp_cleanup();
+        ds4_session_free(session);
+        ds4_engine_close(engine);
+        return 0;
+    }
+#endif
 
     pthread_t worker;
     if (pthread_create(&worker, NULL, worker_main, &s) != 0) die("failed to start worker");
