@@ -16594,7 +16594,8 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
     if (opt->n_threads > 0) g_requested_threads = (uint32_t)opt->n_threads;
 #ifndef DS4_NO_GPU
     if (opt->tp_size > 1 && opt->backend == DS4_BACKEND_CUDA) {
-        if (!ds4_tp_init(opt->tp_size, opt->tp_rank, opt->tp_master_addr)) {
+        if (!ds4_tp_init(opt->tp_size, opt->tp_rank, opt->tp_master_addr,
+                         opt->tp_host, opt->tp_port)) {
             fprintf(stderr, "ds4: TP initialization failed\n");
             free(e);
             *out = NULL;

@@ -8147,6 +8147,10 @@ int main(int argc, char **argv) {
 
     server_config cfg = parse_options(argc, argv);
 
+    /* Wire host/port into TP options so rank 0 can listen for rank 1. */
+    cfg.engine.tp_host = cfg.host;
+    cfg.engine.tp_port = cfg.port;
+
     ds4_engine *engine = NULL;
     if (ds4_engine_open(&engine, &cfg.engine) != 0) return 1;
 
@@ -8201,8 +8205,7 @@ int main(int argc, char **argv) {
             ds4_engine_close(engine);
             return 1;
         }
-        server_log(DS4_LOG_DEFAULT, "ds4-server: TP worker (rank %d) waiting for commands from rank 0", ds4_tp_rank());
-        /* Block until shutdown signal. */
+        server_log(DS4_LOG_DEFAULT, "ds4-server: TP worker (rank %d) waiting for commands", ds4_tp_rank());
         while (!g_stop_requested) {
             usleep(100000);
         }

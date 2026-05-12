@@ -428,7 +428,8 @@ int ds4_tp_broadcast_done(void) {
  * Init / Cleanup.
  * ========================================================================= */
 
-bool ds4_tp_init(int tp_size, int tp_rank, const char *master_addr) {
+bool ds4_tp_init(int tp_size, int tp_rank, const char *master_addr,
+                 const char *local_host, int local_port) {
     if (tp_size <= 1) {
         g_tp_size = 1;
         g_tp_rank = 0;
@@ -438,6 +439,21 @@ bool ds4_tp_init(int tp_size, int tp_rank, const char *master_addr) {
 
     if (tp_rank < 0 || tp_rank >= tp_size) {
         fprintf(stderr, "ds4-tp: invalid rank %d for size %d\n", tp_rank, tp_size);
+        return false;
+    }
+
+    /* Build the rendezvous address.
+     * Rank 0: listens on local_host:local_port (from --host/--port).
+     * Rank 1: connects to master_addr (--tp-master). */
+    char bind_addr[256] = {0};
+    if (tp_rank == 0) {
+        snprintf(bind_addr, sizeof(bind_addr), "%s:%d",
+                 local_host ? local_host : "0.0.0.0",
+                 local_port > 0 ? local_port : 12345);
+    } else if (master_addr && strlen(master_addr) > 0) {
+        snprintf(bind_addr, sizeof(bind_addr), "%s", master_addr);
+    } else {
+        fprintf(stderr, "ds4-tp: rank %d needs --tp-master HOST:PORT\n", tp_rank);
         return false;
     }
 
@@ -451,7 +467,7 @@ bool ds4_tp_init(int tp_size, int tp_rank, const char *master_addr) {
     ncclUniqueId comm_id;
     memset(&comm_id, 0, sizeof(comm_id));
     int control_sock = -1;
-    if (rendezvous_exchange(tp_size, tp_rank, master_addr, &comm_id, &control_sock)) {
+    if (rendezvous_exchange(tp_size, tp_rank, bind_addr, &comm_id, &control_sock)) {
         cudaStreamDestroy(g_tp_stream);
         g_tp_stream = NULL;
         return false;
@@ -471,9 +487,13 @@ bool ds4_tp_init(int tp_size, int tp_rank, const char *master_addr) {
     g_tp_rank = tp_rank;
     g_tp_enabled = 1;
 
-    fprintf(stderr, "ds4-tp: TP enabled: rank %d/%d (master=%s)\n",
-            g_tp_rank, g_tp_size,
-            master_addr ? master_addr : "(local)");
+    if (tp_rank == 0) {
+        fprintf(stderr, "ds4-tp: TP enabled: rank %d/%d listening on %s\n",
+                g_tp_rank, g_tp_size, bind_addr);
+    } else {
+        fprintf(stderr, "ds4-tp: TP enabled: rank %d/%d connected to %s\n",
+                g_tp_rank, g_tp_size, bind_addr);
+    }
     return true;
 }
 

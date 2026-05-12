@@ -21,7 +21,8 @@ struct ds4_session;
  * ensures correct results.
  * ========================================================================= */
 
-bool ds4_tp_init(int tp_size, int tp_rank, const char *master_addr);
+bool ds4_tp_init(int tp_size, int tp_rank, const char *master_addr,
+                 const char *local_host, int local_port);
 void ds4_tp_cleanup(void);
 bool ds4_tp_enabled(void);
 int ds4_tp_size(void);

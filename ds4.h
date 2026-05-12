@@ -74,6 +74,8 @@ typedef struct {
     int tp_size;
     int tp_rank;
     const char *tp_master_addr;
+    const char *tp_host;
+    int tp_port;
 } ds4_engine_options;
 
 typedef void (*ds4_token_emit_fn)(void *ud, int token);
