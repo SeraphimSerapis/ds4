@@ -59,6 +59,7 @@ typedef struct {
 } cuda_block_iq2_xxs;
 
 #include "ds4_iq2_tables_cuda.inc"
+#include "ds4_tp.h"
 
 static const void *g_model_host_base;
 static const char *g_model_device_base;
@@ -8831,6 +8832,14 @@ __global__ static void moe_sum_kernel(float *out, const float *down, uint32_t ou
     out[gid] = acc;
 }
 
+__global__ static void moe_tp_zero_nonlocal_expert_counts_kernel(uint32_t *counts, uint32_t n_expert, uint32_t tp_expert_start, uint32_t tp_expert_count) {
+    uint32_t e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= n_expert) return;
+    if (e < tp_expert_start || e >= tp_expert_start + tp_expert_count) {
+        counts[e] = 0;
+    }
+}
+
 __device__ static float dev_iq2_xxs_dot_f32(const cuda_block_iq2_xxs *row, const float *x, uint32_t nb) {
     float acc = 0.0f;
     for (uint32_t b = 0; b < nb; b++) {
@@ -9165,6 +9174,11 @@ static int routed_moe_launch(
                         (const int32_t *)selected->ptr,
                         pair_count);
                     ok = cuda_ok(cudaGetLastError(), "routed_moe sorted count launch");
+                }
+                if (ok && ds4_tp_enabled()) {
+                    moe_tp_zero_nonlocal_expert_counts_kernel<<<(n_expert + 255u) / 256u, 256>>>(
+                        counts, n_expert, ds4_tp_expert_start(), ds4_tp_expert_count());
+                    ok = cuda_ok(cudaGetLastError(), "routed_moe tp zero nonlocal counts launch");
                 }
                 if (ok) {
                     moe_prefix_sorted_pairs_kernel<<<1, 1>>>(offsets, cursors, counts);

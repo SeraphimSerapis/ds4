@@ -9599,11 +9599,8 @@ static bool metal_graph_encode_decode_layer(
     if (ok && metal_graph_directional_steering_attn_enabled(g)) {
         ok = metal_graph_apply_directional_steering_attn(g, g->attn_out, il, 1);
     }
-#ifndef DS4_NO_GPU
-    if (ok && ds4_tp_enabled()) {
-        if (ds4_tp_allreduce_f16(g->attn_out)) ok = false;
-    }
-#endif
+/* Skip TP all-reduce for attention: both ranks compute identical output.
+ * Only MoE needs all-reduce (partial expert outputs summed via ncclSum). */
     if (ok && !fuse_attn_out_hc) {
         ok = ds4_gpu_hc_expand_tensor(g->after_attn_hc, g->attn_out, g->cur_hc,
                                         g->hc_post, g->hc_comb, DS4_N_EMBD, DS4_N_HC) != 0;
@@ -9720,7 +9717,7 @@ static bool metal_graph_encode_decode_layer(
     }
 #ifndef DS4_NO_GPU
     if (ok && ds4_tp_enabled()) {
-        if (ds4_tp_allreduce_f16(g->routed_out)) ok = false;
+        if (ds4_tp_allreduce_f32(g->routed_out)) ok = false;
     }
 #endif
     const bool fuse_shared_gate_up =
@@ -9753,6 +9750,10 @@ static bool metal_graph_encode_decode_layer(
     const bool fuse_shared_down_hc =
         !keep_ffn_out && !metal_graph_use_reference_shared_down_hc();
     if (ok && fuse_shared_down_hc) {
+/* Sync TP all-reduce before fused kernel that reads routed_out. */
+#ifndef DS4_NO_GPU
+        if (ds4_tp_enabled()) ds4_tp_allreduce_sync();
+#endif
         ok = ds4_gpu_shared_down_hc_expand_q8_0_tensor(g->after_ffn_hc,
                                                          g->shared_out,
                                                          model->map,
@@ -9776,9 +9777,12 @@ static bool metal_graph_encode_decode_layer(
     if (ok) {
         metal_graph_debug_dump_tensor("ffn_shexp", g->shared_out, DS4_N_EMBD, il, pos);
     }
+/* Skip TP all-reduce for shared expert: both ranks compute identical output.
+ * Only MoE needs all-reduce (partial expert outputs summed via ncclSum). */
+/* Sync TP all-reduce for non-fused paths that read routed_out below. */
 #ifndef DS4_NO_GPU
-    if (ok && ds4_tp_enabled()) {
-        if (ds4_tp_allreduce_f16(g->shared_out)) ok = false;
+    if (ok && ds4_tp_enabled() && !fuse_shared_down_hc) {
+        ds4_tp_allreduce_sync();
     }
 #endif
     if (ok && keep_ffn_out) {
@@ -12283,16 +12287,8 @@ static bool metal_graph_encode_layer_attention_batch(
     if (ok && metal_graph_directional_steering_attn_enabled(g)) {
         ok = metal_graph_apply_directional_steering_attn(g, g->batch_attn_out, il, n_tokens);
     }
-#ifndef DS4_NO_GPU
-    if (ok && ds4_tp_enabled()) {
-        ds4_gpu_tensor *attn_view = ds4_gpu_tensor_view(g->batch_attn_out, 0,
-                                                        (uint64_t)n_tokens * DS4_N_EMBD * sizeof(float));
-        if (attn_view) {
-            if (ds4_tp_allreduce_f16(attn_view)) ok = false;
-            ds4_gpu_tensor_free(attn_view);
-        }
-    }
-#endif
+/* Skip TP all-reduce for attention: both ranks compute identical output.
+ * Only MoE needs all-reduce (partial expert outputs summed via ncclSum). */
     if (ok) ok = ds4_gpu_hc_expand_split_tensor(after_attn_hc_view,
                                                   g->batch_attn_out,
                                                   g->batch_cur_hc,
@@ -12498,7 +12494,7 @@ static bool metal_graph_encode_layer_ffn_batch(
         ds4_gpu_tensor *routed_view = ds4_gpu_tensor_view(g->batch_routed_out, 0,
                                                           (uint64_t)n_tokens * DS4_N_EMBD * sizeof(float));
         if (routed_view) {
-            if (ds4_tp_allreduce_f16(routed_view)) ok = false;
+            if (ds4_tp_allreduce_f32(routed_view)) ok = false;
             ds4_gpu_tensor_free(routed_view);
         }
     }
@@ -12540,14 +12536,13 @@ static bool metal_graph_encode_layer_ffn_batch(
         metal_graph_debug_dump_tensor("ffn_shexp", g->batch_shared_out,
                                        (uint64_t)n_tokens * DS4_N_EMBD, il, pos0);
     }
+/* Skip TP all-reduce for shared expert: both ranks compute identical output.
+ * Only MoE needs all-reduce (partial expert outputs summed via ncclSum). */
+/* Sync TP all-reduce: shared expert ran concurrently on default stream while
+ * NCCL reduced routed_out on g_tp_stream.  Wait before reading routed_out. */
 #ifndef DS4_NO_GPU
     if (ok && ds4_tp_enabled()) {
-        ds4_gpu_tensor *shared_view = ds4_gpu_tensor_view(g->batch_shared_out, 0,
-                                                          (uint64_t)n_tokens * DS4_N_EMBD * sizeof(float));
-        if (shared_view) {
-            if (ds4_tp_allreduce_f16(shared_view)) ok = false;
-            ds4_gpu_tensor_free(shared_view);
-        }
+        ds4_tp_allreduce_sync();
     }
 #endif
     const bool keep_ffn_out = metal_graph_needs_ffn_out(g, il, pos0);

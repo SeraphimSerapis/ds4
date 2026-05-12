@@ -1,4 +1,7 @@
 #include "ds4.h"
+#ifndef DS4_NO_GPU
+#include "ds4_tp.h"
+#endif
 
 /* Purpose-built throughput benchmark.
  *
@@ -36,6 +39,9 @@ typedef struct {
     double step_mul;
     bool warm_weights;
     bool quality;
+    int tp_size;
+    int tp_rank;
+    const char *tp_master;
 } bench_config;
 
 static double bench_now_sec(void) {
@@ -68,6 +74,9 @@ static void usage(FILE *fp) {
         "  -t, --threads N        CPU helper threads.\n"
         "  --quality              Prefer exact kernels where applicable.\n"
         "  --warm-weights         Touch mapped tensor pages before benchmarking.\n"
+        "  --tp N                 Tensor parallelism degree (1 or 2). Requires --cuda.\n"
+        "  --tp-rank N            TP rank (0..N-1). Default: 0.\n"
+        "  --tp-master HOST:PORT  Master node address for TP rendezvous.\n"
         "\n"
         "Sweep:\n"
         "  --ctx-start N          First measured frontier. Default: 2048\n"
@@ -86,6 +95,16 @@ static int parse_int(const char *s, const char *opt) {
     char *end = NULL;
     long v = strtol(s, &end, 10);
     if (s[0] == '\0' || *end != '\0' || v <= 0 || v > INT_MAX) {
+        fprintf(stderr, "ds4-bench: invalid value for %s: %s\n", opt, s);
+        exit(2);
+    }
+    return (int)v;
+}
+
+static int parse_nonneg_int_arg(const char *s, const char *opt) {
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (s[0] == '\0' || *end != '\0' || v < 0 || v > INT_MAX) {
         fprintf(stderr, "ds4-bench: invalid value for %s: %s\n", opt, s);
         exit(2);
     }
@@ -221,6 +240,12 @@ static bench_config parse_options(int argc, char **argv) {
             c.quality = true;
         } else if (!strcmp(arg, "--warm-weights")) {
             c.warm_weights = true;
+        } else if (!strcmp(arg, "--tp")) {
+            c.tp_size = parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--tp-rank")) {
+            c.tp_rank = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--tp-master")) {
+            c.tp_master = need_arg(&i, argc, argv, arg);
         } else {
             fprintf(stderr, "ds4-bench: unknown option: %s\n", arg);
             usage(stderr);
@@ -293,6 +318,9 @@ int main(int argc, char **argv) {
         .n_threads = cfg.threads,
         .warm_weights = cfg.warm_weights,
         .quality = cfg.quality,
+        .tp_size = cfg.tp_size,
+        .tp_rank = cfg.tp_rank,
+        .tp_master_addr = cfg.tp_master,
     };
     ds4_engine *engine = NULL;
     if (ds4_engine_open(&engine, &opt) != 0) return 1;
@@ -344,6 +372,29 @@ int main(int argc, char **argv) {
     int previous = 0;
     int rc = 0;
 
+#ifndef DS4_NO_GPU
+    /* Rank 1: start TP worker thread and wait for commands from rank 0.
+     * The worker participates in all-reduce via ds4_session_sync/eval. */
+    if (ds4_tp_enabled() && ds4_tp_rank() != 0) {
+        if (ds4_tp_worker_init(session) != 0) {
+            fprintf(stderr, "ds4-bench: failed to start TP worker\n");
+            rc = 1;
+        } else {
+            fprintf(stderr, "ds4-bench: rank %d worker running, waiting for rank 0...\n",
+                    ds4_tp_rank());
+            /* Block until rank 0 shuts down the worker via TP cleanup. */
+            for (;;) {
+                struct timespec ts = {1, 0};
+                nanosleep(&ts, NULL);
+            }
+        }
+        ds4_session_free(session);
+        ds4_tokens_free(&prompt);
+        ds4_engine_close(engine);
+        return rc;
+    }
+#endif
+
     for (int frontier = cfg.ctx_start; ; frontier = next_frontier(&cfg, frontier)) {
         ds4_tokens prefix = {
             .v = prompt.v,
@@ -352,6 +403,15 @@ int main(int argc, char **argv) {
         };
 
         const double prefill_t0 = bench_now_sec();
+#ifndef DS4_NO_GPU
+        if (ds4_tp_enabled() && ds4_tp_rank() == 0) {
+            if (ds4_tp_broadcast_prefill(prefix.v, prefix.len) != 0) {
+                fprintf(stderr, "ds4-bench: TP prefill broadcast failed at frontier %d\n", frontier);
+                rc = 1;
+                break;
+            }
+        }
+#endif
         if (ds4_session_sync(session, &prefix, err, sizeof(err)) != 0) {
             fprintf(stderr, "ds4-bench: prefill to %d failed: %s\n", frontier, err);
             rc = 1;
@@ -380,6 +440,15 @@ int main(int argc, char **argv) {
                 rc = 1;
                 break;
             }
+#ifndef DS4_NO_GPU
+            if (ds4_tp_enabled() && ds4_tp_rank() == 0) {
+                if (ds4_tp_broadcast_eval(token) != 0) {
+                    fprintf(stderr, "ds4-bench: TP eval broadcast failed at frontier %d\n", frontier);
+                    rc = 1;
+                    break;
+                }
+            }
+#endif
             if (ds4_session_eval(session, token, err, sizeof(err)) != 0) {
                 fprintf(stderr, "ds4-bench: decode at frontier %d failed: %s\n", frontier, err);
                 rc = 1;
@@ -388,6 +457,12 @@ int main(int argc, char **argv) {
         }
         const double gen_t1 = bench_now_sec();
         if (rc != 0) break;
+
+#ifndef DS4_NO_GPU
+        if (ds4_tp_enabled() && ds4_tp_rank() == 0) {
+            ds4_tp_broadcast_done();
+        }
+#endif
 
         if (ds4_session_load_snapshot(session, &snap, err, sizeof(err)) != 0) {
             fprintf(stderr, "ds4-bench: restore at %d failed: %s\n", frontier, err);

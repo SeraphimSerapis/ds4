@@ -7013,9 +7013,25 @@ static void generate_job(server *s, job *j) {
         cold_store_len = kv_cache_store_len(&s->kv, prompt_for_sync->len);
     }
 
+#ifndef DS4_NO_GPU
+    if (ds4_tp_enabled() && ds4_tp_rank() == 0) {
+        if (ds4_tp_broadcast_prefill(prompt_for_sync->v, prompt_for_sync->len) != 0) {
+            ds4_tokens_free(&effective_prompt);
+            ds4_session_set_progress(s->session, NULL, NULL);
+            trace_event(s, trace_id, "TP prefill broadcast failed");
+            http_error(j->fd, 500, "TP prefill broadcast failed");
+            return;
+        }
+    }
+#endif
+
     if (s->kv.enabled &&
         cold_store_len >= s->kv.opt.min_tokens &&
-        cold_store_len < prompt_for_sync->len)
+        cold_store_len < prompt_for_sync->len
+#ifndef DS4_NO_GPU
+        && !ds4_tp_enabled()
+#endif
+        )
     {
         ds4_tokens prefix = {0};
         tokens_copy_prefix(&prefix, prompt_for_sync, cold_store_len);
@@ -7033,17 +7049,6 @@ static void generate_job(server *s, job *j) {
         ds4_tokens_free(&prefix);
     }
 
-#ifndef DS4_NO_GPU
-    if (ds4_tp_enabled() && ds4_tp_rank() == 0) {
-        if (ds4_tp_broadcast_prefill(prompt_for_sync->v, prompt_for_sync->len) != 0) {
-            ds4_tokens_free(&effective_prompt);
-            ds4_session_set_progress(s->session, NULL, NULL);
-            trace_event(s, trace_id, "TP prefill broadcast failed");
-            http_error(j->fd, 500, "TP prefill broadcast failed");
-            return;
-        }
-    }
-#endif
     if (ds4_session_sync(s->session, prompt_for_sync, err, sizeof(err)) != 0) {
         ds4_tokens_free(&effective_prompt);
         ds4_session_set_progress(s->session, NULL, NULL);

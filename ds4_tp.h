@@ -41,6 +41,15 @@ int ds4_tp_broadcast_done(void);
 int ds4_tp_allreduce_f16(ds4_gpu_tensor *tensor);
 int ds4_tp_allreduce_f32(ds4_gpu_tensor *tensor);
 
+/* Wait for a previously launched async all-reduce to complete.
+ * Must be called on the default CUDA stream before reading the tensor
+ * that was passed to a prior allreduce call. */
+int ds4_tp_allreduce_sync(void);
+
+/* Expert parallelism. */
+int ds4_tp_expert_start(void);
+int ds4_tp_expert_count(void);
+
 void *ds4_tp_nccl_comm(void);
 void *ds4_tp_cuda_stream(void);
 

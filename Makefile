@@ -83,7 +83,7 @@ ds4_cli.o: ds4_cli.c ds4.h linenoise.h
 ds4_server.o: ds4_server.c ds4.h rax.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_server.c
 
-ds4_bench.o: ds4_bench.c ds4.h
+ds4_bench.o: ds4_bench.c ds4.h ds4_tp.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_bench.c
 
 ds4_test.o: tests/ds4_test.c ds4_server.c ds4.h rax.h
