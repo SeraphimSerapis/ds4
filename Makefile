@@ -28,7 +28,7 @@ endif
 NVCCFLAGS ?= -O3 --use_fast_math $(NVCC_ARCH_FLAGS) -Xcompiler $(NATIVE_CPU_FLAG) -Xcompiler -pthread
 CUDA_LDLIBS ?= -lm -Xcompiler -pthread -L$(CUDA_HOME)/targets/sbsa-linux/lib -L$(CUDA_HOME)/lib64 -lcudart -lcublas
 NCCL_HOME ?= /home/tim/code/nccl/build
-CUDA_LDLIBS += -L$(NCCL_HOME)/lib -lnccl
+CUDA_LDLIBS += -L$(NCCL_HOME)/lib -lnccl -Xlinker -rpath -Xlinker $(NCCL_HOME)/lib
 CORE_OBJS = ds4.o ds4_cuda.o ds4_tp.o
 CPU_CORE_OBJS = ds4_cpu.o
 METAL_LDLIBS := $(LDLIBS)

@@ -8067,7 +8067,7 @@ static server_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--tp")) {
             c.engine.tp_size = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--tp-rank")) {
-            c.engine.tp_rank = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
+            c.engine.tp_rank = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--tp-master")) {
             c.engine.tp_master_addr = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--metal")) {
